@@ -49,13 +49,15 @@ int maxV[SENSOR_COUNT];
 //各个传感器的出现最大电压时的时间(ms)
 long maxVTime[SENSOR_COUNT];
 
-
+//排序用时间数组
 struct TimeInfo {
   int sensorId;//传感器对应下标
   int maxVTime;//传感器最大波峰时间
   int orgMaxVTime;//原始、未经调整的传感器最大波峰时间
   int realOrder;//实际顺序，两个传感器序号可能相同
 };
+TimeInfo times[SENSOR_COUNT];
+
 void initVArray() {
   for (int i = 0; i < SENSOR_COUNT; i++) {
     //    for(int j=0;j<samplePeriodCount;j++){
@@ -139,14 +141,14 @@ int hasCompletedAction() {
    将识别出来的手势动作转换为红外信号发射
 */
 void sendAction(int action) {
-
+  Serial.print("Action:")
+  Serial.println(action);
 }
 /**
-   使用冒泡排序算法，根据波峰时间进行排序，0排在最后，
+   使用冒泡排序算法，根据波峰时间进行排序，排序结果放在times数组中
 */
-void sort() {
+int recognizeAction_sort() {
   //先复制maxVTime数据到临时数组
-  TimeInfo times[SENSOR_COUNT];
   long i, j;
   for (int i = 0; i < SENSOR_COUNT; i++) {
     times[i].sensorId = i;
@@ -170,8 +172,12 @@ void sort() {
   for (int i = 0; i < SENSOR_COUNT; i++) {
     times[i].realOrder = i;
   }
-
-  //获取开始/结束时间
+}
+/**
+ * 对排序结果进行优化，如果两个时间接近，则调整为相同的时间点和顺序，允许一定时间点的误差
+ */
+void recognizeAction_refineOrder(){
+   //获取开始/结束时间
   long firstTime;
   long lastTime = times[SENSOR_COUNT - 1].maxVTime;
   for (int i = 0; i < SENSOR_COUNT; i++) {
@@ -181,7 +187,7 @@ void sort() {
       break;
     }
   }
-  //如果两个时间接近，则调整为相同的时间点和顺序，允许一定时间点的误差
+  //调整排序结果
   long minSensorPeriodTime = (lastTime - firstTime) * MIN_SENSOR_PERIOD_RATE;
   for (int i = 1; i < SENSOR_COUNT; i++) {
     //每个传感器与排在前面的传感器比较
@@ -194,14 +200,28 @@ void sort() {
       }
     }
   }
-  return 0;
-
+}
+//将排序结果转换为整数类型的action，
+int recognizeAction_covertToActionCode(){
+  int sensorOrder[SENSOR_COUNT];
+  for(int i=0;i<SENSOR_COUNT;i++){
+    int sensorId=times[i].sensorId;
+    sensorOrder[sensorId]=times[i].realOrder;
+  }
+  int actionCode=0;
+  for(int i=0;i<SENSOR_COUNT;i++){
+    int sensorId=times[i].sensorId;
+    actionCode=actionCode*10+sensorOrder[i];
+  }
+  return actionCode;
 }
 /**
    根据SensorData识别Action
 */
 int recognizeAction() {
-  int sensorOrder[SENSOR_COUNT] = {0};
+  recognizeAction_sort();
+  recognizeAction_refineOrder();
+  return recognizeAction_covertToActionCode();
 }
 
 void resetSensorData() {
