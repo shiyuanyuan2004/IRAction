@@ -20,7 +20,7 @@ const int perSamplePeriodInMs=10;
 const int samplePeriodCount=totalPeriodInMs/perSamplePeriodInMs;
 
 //各个传感器电压值，第一个维度是传感器，第二个是取样区间，循环记录在长度100的数组中。
-int v[sensorCount][samplePeriodCount];
+//int v[sensorCount][samplePeriodCount];
 //各个传感器的平均电压
 int avgV[sensorCount];
 
