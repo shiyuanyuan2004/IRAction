@@ -10,6 +10,7 @@
 const int SENSOR_COUNT = 4;
 const int ACTION_COUNT=9;
 const int ACTION_CODE_COUNT=7;
+const int TIME_SPLITS=6;//将整个action时间平分为6份,再多的话训练数据量太多
 const String ACTION_NAMES[9]={"Invalid","Left","Right","Up","Down","LeftUp","LeftDown","RightUp","RightDown"};
 const int ACTION_CODES[ACTION_COUNT][ACTION_CODE_COUNT]={
                     {9999}, //Invalid
@@ -53,9 +54,6 @@ const float MIN_PEAK_V_RATE = 1.2f;
 //判断波峰的最小值，相对于平均值增加的数量
 const int MIN_PEAK_V_AMOUNT = 50;
 
-//判断两个传感器先后顺序的最小间隔时间比例，以整个手势时间为基准。用于容错处理，允许少于的方向偏差
-const float MIN_SENSOR_PERIOD_RATE = 0.15f;
-
 //上次打印debug时间，用于控制debug输出内容的时间间隔
 unsigned long lastDebugTime=0;
 
@@ -66,10 +64,8 @@ struct Sensor {
   float avgV;//平均电压
   float peakV;//最大电压
   unsigned long peakVTime;//传感器最大波峰时间(ms)
-  unsigned long orgPeakVTime;//原始、未经调整的传感器最大波峰时间
-  int realOrder;//实际顺序，两个传感器序号可能相同。最早的传感器为1，如果某个传感器没有波峰，则设置为9
+  int order;//实际顺序，两个传感器序号可能相同。最早的传感器为1，如果某个传感器没有波峰，则设置为9
 };
-Sensor sortedSensors[SENSOR_COUNT];
 Sensor sensors[SENSOR_COUNT];
 
 void initVArray() {
@@ -79,8 +75,7 @@ void initVArray() {
     sensors[i].avgV = 0;
     sensors[i].peakV = 0;
     sensors[i].peakVTime = 0;
-    sensors[i].orgPeakVTime = 0;
-    sensors[i].realOrder = 0;
+    sensors[i].order = 0;
   }
 }
 void setup() {
@@ -121,7 +116,6 @@ void readSensorData() {
     && isAboveAvgV(sensors[s])) {
       sensors[s].peakV = sensors[s].curV;
       sensors[s].peakVTime = t;
-      sensors[s].orgPeakVTime = t;
     }
   }
 }
@@ -134,8 +128,8 @@ void printSensorData(int printInfo,String info,Sensor sensors[]){
   for (int i = 0; i < SENSOR_COUNT; i++) {
     int sensorId=sensors[i].sensorId;
     Serial.println(SENSOR_NAMES[sensorId]+"   sensorId:"+sensorId+"   cur:"+sensors[i].curV+"   peakV:"+sensors[i].peakV+"   avgV:"+sensors[i].avgV+"   peakVTime:"
-    +(sensors[i].peakVTime/1000)+(".")+(sensors[i].peakVTime % 1000)+"   orgPeakVTime:"+(sensors[i].orgPeakVTime/1000)+(".")+(sensors[i].orgPeakVTime % 1000)
-    +"   realOrder:"+sensors[i].realOrder);
+    +(sensors[i].peakVTime/1000)+(".")+(sensors[i].peakVTime % 1000)
+    +"   order:"+sensors[i].order);
   }
 
 }
@@ -174,83 +168,49 @@ void sendAction(int actionId) {
   Serial.print("Action:");Serial.println(ACTION_NAMES[actionId]);
 }
 /**
-   使用冒泡排序算法，根据波峰时间进行排序，排序结果放在sortedSensors数组中
-*/
-int recognizeAction_sort() {
-  //先复制peakVTime数据到临时数组
-  for (int i = 0; i < SENSOR_COUNT; i++) {
-    sortedSensors[i]=sensors[i];
-  }
-  
-  //冒泡排序
-  for (int i = 0; i < SENSOR_COUNT - 1; i++) //n个数的数列总共扫描n-1次
-  {
-    for (int j = 0; j < SENSOR_COUNT - i - 1; j++) //每一趟扫描到a[n-i-2]与a[n-i-1]比较为止结束
-    {
-      if (sortedSensors[j].peakVTime > sortedSensors[j + 1].peakVTime) //如果后一位数比前一位数小的话，就交换两个数的位置（升序）
-      {
-        Sensor t = sortedSensors[j + 1];
-        sortedSensors[j + 1] = sortedSensors[j];
-        sortedSensors[j] = t;
-      }
-    }
-  }
-  //根据排好序的波峰时间，给每个SENSOR指定实际序号
-  for (int i = 0; i < SENSOR_COUNT; i++) {
-    sortedSensors[i].realOrder = i+1;
-    if(sortedSensors[i].peakVTime==0){//无信号
-      sortedSensors[i].realOrder = 9;
-    }
-  }
-}
-/**
- * 对排序结果进行优化，如果两个时间接近，则调整为相同的时间点和顺序，允许一定时间点的误差
+ * 按peak进行排序
  */
-void recognizeAction_refineOrder(){
+void sort(){
    //获取开始/结束时间
-  unsigned long firstTime=0;
-  unsigned long lastTime = sortedSensors[SENSOR_COUNT - 1].peakVTime;
-  for (int i = 0; i < SENSOR_COUNT; i++) {
-    if (sortedSensors[i].peakVTime > 0) {
-      //第一个不为0的时间为firstTime
-      firstTime = sortedSensors[i].peakVTime;
-      break;
+  unsigned long startTime=sensors[0].peakVTime;
+  unsigned long endTime =sensors[0].peakVTime;
+  for (int i = 1; i < SENSOR_COUNT; i++) {
+    unsigned long peakTime=sensors[i].peakVTime;
+    if (peakTime > 0) {
+        if(peakTime<startTime){
+          startTime=peakTime;
+        }
+        if(peakTime>endTime){
+          endTime=peakTime;
+        }
     }
   }
-  //调整排序结果
-  long minSensorPeriodTime = (lastTime - firstTime) * MIN_SENSOR_PERIOD_RATE;
-  Serial.print("firstTime:");Serial.print(firstTime);Serial.print(",lastTime:");Serial.print(lastTime);
-  Serial.print(",MIN_SENSOR_PERIOD_RATE:");Serial.print(MIN_SENSOR_PERIOD_RATE);  Serial.print("，minSensorPeriodTime:"); Serial.println(minSensorPeriodTime);
-
-  for (int i = 1; i < SENSOR_COUNT; i++) {
-    //每个传感器与排在前面的传感器比较
-    if (sortedSensors[i].peakVTime - sortedSensors[i-1].peakVTime <= minSensorPeriodTime) {
-      //与前一个传感器差别小于指定参数，则调整时间点和顺序
-      sortedSensors[i].peakVTime = sortedSensors[i-1].peakVTime;
-      sortedSensors[i].realOrder = sortedSensors[i-1].realOrder;
+  //排序
+  long totalTime=endTime-startTime;
+  Serial.print("startTime:");Serial.print(startTime);Serial.print(",endTime:");Serial.print(endTime);Serial.print(",totalTime:");Serial.println(totalTime);
+  for (int i = 0; i < SENSOR_COUNT; i++) {
+    //根据时间偏移，除以分片时间，直接获取序号，从1开始
+    int order;
+    if(sensors[i].peakVTime==0){
+      order=0;
     }
     else{
-      if(sortedSensors[i-1].realOrder<9){
-        sortedSensors[i].realOrder = sortedSensors[i-1].realOrder+1;
-      }
-      else{
-        sortedSensors[i].realOrder =1;
+      long timeOffset=sensors[i].peakVTime-startTime;
+      order=timeOffset*TIME_SPLITS/totalTime+1;
+      if(order>TIME_SPLITS){
+        order=TIME_SPLITS;//最后一个设置为TIME_SPLITS
       }
     }
-    
+    sensors[i].order = order;
   }
 }
 //将排序结果转换为整数类型的action，
-int recognizeAction_covertToActionId(){
-  for(int i=0;i<SENSOR_COUNT;i++){
-    int sensorId=sortedSensors[i].sensorId;
-    sensors[sensorId].realOrder=sortedSensors[i].realOrder;
-  }
+int covertToActionId(){
   int actionCode=0;
   for(int i=0;i<SENSOR_COUNT;i++){
-    actionCode=actionCode*10+sensors[i].realOrder;
+    actionCode=actionCode*10+sensors[i].order;
   }
-
+  
   Serial.println(actionCode);
   for(int i=0;i<ACTION_COUNT;i++){
     for(int j=0;j<ACTION_CODE_COUNT;j++){
@@ -261,35 +221,23 @@ int recognizeAction_covertToActionId(){
   }
   return 0;//如果未找到，return 0
 }
-/**
-   根据SensorData识别Action
-*/
-int recognizeAction() {
-  recognizeAction_sort();
-  printSensorData(1,"Sort Result",sortedSensors);
-  recognizeAction_refineOrder();
-  printSensorData(1,"Sort Refined Result",sortedSensors);
- resetSensorData();
-  return recognizeAction_covertToActionId();
-}
 
 void resetSensorData() {
   for (int i = 0; i < SENSOR_COUNT; i++) {
     sensors[i].curV = 0;
     sensors[i].peakV = 0;
     sensors[i].peakVTime = 0;
-    sensors[i].orgPeakVTime = 0;
-    sensors[i].realOrder = 0;
+    sensors[i].order = 0;
   }
 }
 
 void loop() {
   readSensorData();
-  //printSensorData(1,"",sensors);
   if (hasCompletedAction()) {
     Serial.println("New Action");
+    sort();
     printSensorData(0,"",sensors);
-    int action = recognizeAction();
+    int action =covertToActionId();
     sendAction(action);
     resetSensorData();
   }
