@@ -1,4 +1,3 @@
-//sensor重命名
 #include "Arduino.h"
 //不要使用自定义format函数，函数内字符串拼接有bug，导致死机
 /*
@@ -12,17 +11,6 @@ const int ACTION_COUNT=9;
 const int ACTION_CODE_COUNT=16;
 const int TIME_SPLITS=6;//将整个action时间平分为6份,再多的话训练数据量太多
 const String ACTION_NAMES[9]={"Invalid","Left","Right","Up","Down","LeftUp","LeftDown","RightUp","RightDown"};
-const int ACTION_CODES[ACTION_COUNT][ACTION_CODE_COUNT]={
-                    {0000}, //Invalid
-                    {5151,5152,5161,5162, 5251,5252,5261,5262,  6151,6152,6161,6162, 6251,6252,6261,6262},
-                    {1515,1516,1525,1526, 1615,1616,1625,1626,  2515,2516,2525,2526, 2615,2616,2625,2626},
-                    {5511,5512,5521,5522, 5611,5612,5621,5622,  5511,5512,5521,5522, 5611,5612,5621,5622},
-                    {1155,1156,1165,1166, 1255,1256,1265,1266,  2155,2156,2165,2166, 2255,2256,2265,2266},
-                    {6331,6341,6431,6441,/*容错*//* 6321,6231,6421,6241,  6351,6531,6451,6251*/},
-                    {3163,3164,4163,4164,/*容错*//* 3162,2163,4162,2164,  3165,5163,4153,2561*/},
-                    {3613,3614,4613,4614,/*容错*//*3612,2613,4612,2614,  3615,5613,4615,2651*/},
-                    {1336,1346,1436,1446,/*容错*//* 1326,1236,1426,1246,  1356,1536,1456,1256*/} 
-            };
 //传感器输入pin，数组下标按照从左到右、从上到下方式排列
 const int INPUT_PIN[SENSOR_COUNT] = {A1, A2, A3, A4};
 const String SENSOR_NAMES[SENSOR_COUNT] = {"S_1_1", "S_1_2", "S_2_1", "S_2_2"};
@@ -45,19 +33,17 @@ const int MIN_PEAK_V_AMOUNT = 50;
 
 //上次打印debug时间，用于控制debug输出内容的时间间隔
 uint64_t lastDebugTime=0;
-
+const int ENTRY=0;
+const int PEAK=1;
+const int EXIT=2;
 //排序用时间数组
 struct Sensor {
   int sensorId;//传感器对应下标
   float curV;//当前电压
   float avgV;//平均电压
   float peakV;//最大电压
-  uint64_t peakVTime;//传感器最大波峰时间(微秒)
-  int peakOrder;//最大波峰顺序，两个传感器序号可能相同。最早的传感器为1，如果某个传感器没有波峰，则设置为0
-  uint64_t entryTime;//传感器波峰进入时间(微秒)
-  int entryOrder;//进入波峰顺序，两个传感器序号可能相同。最早的传感器为1，如果某个传感器没有波峰，则设置为0
-  uint64_t exitTime;//离开波峰时间(微秒)
-  int exitOrder;//离开波峰顺序，两个传感器序号可能相同。最早的传感器为1，如果某个传感器没有波峰，则设置为0
+  uint64_t peakVTime[3];//传感器波峰时间(微秒),Entry/Peak/Exit
+  int peakOrder;//波峰顺序,Entry/Peak/Exit，两个传感器序号可能相同。最早的传感器为1，如果某个传感器没有波峰，则设置为0
   //使用entry/peak/exit三个时间和顺序，通过三套方式进行判断，提高准确度
 };
 Sensor sensors[SENSOR_COUNT];
@@ -99,9 +85,9 @@ void readSensorData() {
     //清理掉PEAK_ACTION_PERIOD之前的数据
     if(sensors[s].peakV>0&&t-sensors[s].peakVTime>PEAK_ACTION_PERIOD){
        sensors[s].peakV = 0;
-       sensors[s].peakVTime = 0;
-       sensors[s].entryTime = 0;
-       sensors[s].exitTime = 0;
+       for(int i=0;i<=2;i++){
+        sensors[s].peakVTime[i] = 0;
+       }
     }
     //读取数据
     sensors[s].curV = analogRead(INPUT_PIN[s]);
@@ -115,15 +101,15 @@ void readSensorData() {
     if(isAboveAvgV(sensors[s])){
       if (sensors[s].curV > sensors[s].peakV ) {//设置波峰
         sensors[s].peakV = sensors[s].curV;
-        sensors[s].peakVTime = t;
+        sensors[s].peakVTime[PEAK] = t;
       }
-      if (sensors[s].entryTime==0 ) {//设置进入时间
-        sensors[s].entryTime = t;
+      if (sensors[s].peakVTime[ENTRY]==0 ) {//设置进入时间
+        sensors[s].peakVTime[ENTRY] = t;
       }
     }
     else{
-      if (sensors[s].exitTime==0&&sensors[s].entryTime>0 ) {//设置离开时间
-        sensors[s].exitTime = t;
+      if (sensors[s].peakVTime[EXIT]==0&&sensors[s].peakVTime[ENTRY]>0 ) {//设置离开时间
+        sensors[s].peakVTime[ENTRY] = t;
       }
     }
   }
@@ -137,9 +123,9 @@ void printSensorData(int printInfo,String info,Sensor sensors[]){
   for (int i = 0; i < SENSOR_COUNT; i++) {
     int sensorId=sensors[i].sensorId;
     Serial.println(SENSOR_NAMES[sensorId]+"   sensorId:"+sensorId+"   cur:"+sensors[i].curV+"   peakV:"+sensors[i].peakV+"   avgV:"+sensors[i].avgV
-      +"   entryTime:" +((double)sensors[i].entryTime/1000)+"   entryOrder:"+sensors[i].entryOrder
-      +"   peakVTime:" +((double)sensors[i].peakVTime/1000)+"   peakOrder:"+sensors[i].peakOrder
-      +"   exitTime:" +((double)sensors[i].exitTime/1000)+"   exitOrder:"+sensors[i].exitOrder
+      +"   entryTime:" +((double)sensors[s].peakVTime[ENTRY]/1000)+"   entryOrder:"+sensors[i].peakOrder[ENTRY]
+      +"   peakVTime:" +((double)sensors[s].peakVTime[PEAK]/1000)+"   peakOrder:"+sensors[i].peakOrder[PEAK]
+      +"   exitTime:" +((double)sensors[s].peakVTime[EXIT]/1000)+"   exitOrder:"+sensors[i].peakOrder[EXIT]
       );
   }
 
@@ -181,122 +167,43 @@ void sendAction(int actionId) {
 /**
  * 按peak进行排序
  */
-void sortPeak(){
-   //获取开始/结束时间
-  uint64_t startTime=sensors[0].peakVTime;
-  uint64_t endTime =sensors[0].peakVTime;
-  for (int i = 1; i < SENSOR_COUNT; i++) {
-    uint64_t peakTime=sensors[i].peakVTime;
-    if (peakTime > 0) {
-        if(peakTime<startTime){
-          startTime=peakTime;
-        }
-        if(peakTime>endTime){
-          endTime=peakTime;
-        }
-    }
-  }
-  //排序
-  uint64_t totalTime=endTime-startTime;
-//  Serial.print("startTime:");Serial.print(startTime);Serial.print(",endTime:");Serial.print(endTime);Serial.print(",totalTime:");Serial.println(totalTime);
-  if(totalTime==0){
-    return;
-  }
-  for (int i = 0; i < SENSOR_COUNT; i++) {
-    //根据时间偏移，除以分片时间，直接获取序号，从1开始
-    int order;
-    if(sensors[i].peakVTime==0){
-      order=0;
-    }
-    else{
-      uint64_t timeOffset=sensors[i].peakVTime-startTime;
-      order=timeOffset*TIME_SPLITS/totalTime+1;
-      if(order>TIME_SPLITS){
-        order=TIME_SPLITS;//最后一个设置为TIME_SPLITS
+void sort(){
+  for(int n=0;n<=2;n++){//分别排序Entry/Peak/Exit
+     //获取开始/结束时间
+    uint64_t startTime=sensors[0].peakVTime[n];
+    uint64_t endTime =sensors[0].peakVTime[n];
+    for (int i = 1; i < SENSOR_COUNT; i++) {
+      uint64_t peakTime=sensors[i].peakVTime[n];
+      if (peakTime > 0) {
+          if(peakTime<startTime){
+            startTime=peakTime;
+          }
+          if(peakTime>endTime){
+            endTime=peakTime;
+          }
       }
     }
-    sensors[i].peakOrder = order;
-  }
-}
-/**
- * 按entry进行排序
- */
-void sortEntry(){
-   //获取开始/结束时间
-  uint64_t startTime=sensors[0].entryTime;
-  uint64_t endTime =sensors[0].entryTime;
-  for (int i = 1; i < SENSOR_COUNT; i++) {
-    uint64_t entryTime=sensors[i].entryTime;
-    if (entryTime > 0) {
-        if(entryTime<startTime){
-          startTime=entryTime;
-        }
-        if(entryTime>endTime){
-          endTime=entryTime;
-        }
+    //排序
+    uint64_t totalTime=endTime-startTime;
+  //  Serial.print("startTime:");Serial.print(startTime);Serial.print(",endTime:");Serial.print(endTime);Serial.print(",totalTime:");Serial.println(totalTime);
+    if(totalTime==0){
+      return;
     }
-  }
-  //排序
-  uint64_t totalTime=endTime-startTime;
-//  Serial.print("startTime:");Serial.print(startTime);Serial.print(",endTime:");Serial.print(endTime);Serial.print(",totalTime:");Serial.println(totalTime);
-  if(totalTime==0){
-    return;
-  }
-  for (int i = 0; i < SENSOR_COUNT; i++) {
-    //根据时间偏移，除以分片时间，直接获取序号，从1开始
-    int order;
-    if(sensors[i].entryTime==0){
-      order=0;
-    }
-    else{
-      uint64_t timeOffset=sensors[i].entryTime-startTime;
-      order=timeOffset*TIME_SPLITS/totalTime+1;
-      if(order>TIME_SPLITS){
-        order=TIME_SPLITS;//最后一个设置为TIME_SPLITS
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+      //根据时间偏移，除以分片时间，直接获取序号，从1开始
+      int order;
+      if(sensors[i].peakVTime==0){
+        order=0;
       }
-    }
-    sensors[i].entryOrder = order;
-  }
-}
-
-/**
- * 按exit进行排序
- */
-void sortExit(){
-   //获取开始/结束时间
-  uint64_t startTime=sensors[0].exitTime;
-  uint64_t endTime =sensors[0].exitTime;
-  for (int i = 1; i < SENSOR_COUNT; i++) {
-    uint64_t exitTime=sensors[i].exitTime;
-    if (exitTime > 0) {
-        if(exitTime<startTime){
-          startTime=exitTime;
+      else{
+        uint64_t timeOffset=sensors[i].peakVTime[n]-startTime;
+        order=timeOffset*TIME_SPLITS/totalTime+1;
+        if(order>TIME_SPLITS){
+          order=TIME_SPLITS;//最后一个设置为TIME_SPLITS
         }
-        if(exitTime>endTime){
-          endTime=exitTime;
-        }
-    }
-  }
-  //排序
-  uint64_t totalTime=endTime-startTime;
-//  Serial.print("startTime:");Serial.print(startTime);Serial.print(",endTime:");Serial.print(endTime);Serial.print(",totalTime:");Serial.println(totalTime);
-  if(totalTime==0){
-    return;
-  }
-  for (int i = 0; i < SENSOR_COUNT; i++) {
-    //根据时间偏移，除以分片时间，直接获取序号，从1开始
-    int order;
-    if(sensors[i].exitTime==0){
-      order=0;
-    }
-    else{
-      uint64_t timeOffset=sensors[i].exitTime-startTime;
-      order=timeOffset*TIME_SPLITS/totalTime+1;
-      if(order>TIME_SPLITS){
-        order=TIME_SPLITS;//最后一个设置为TIME_SPLITS
       }
+      sensors[i].peakOrder = order;
     }
-    sensors[i].exitOrder = order;
   }
 }
 //将排序结果转换为整数类型的action，
