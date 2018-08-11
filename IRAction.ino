@@ -9,27 +9,19 @@
  */
 const int SENSOR_COUNT = 4;
 const int ACTION_COUNT=9;
-const int ACTION_CODE_COUNT=7;
+const int ACTION_CODE_COUNT=16;
 const int TIME_SPLITS=6;//将整个action时间平分为6份,再多的话训练数据量太多
 const String ACTION_NAMES[9]={"Invalid","Left","Right","Up","Down","LeftUp","LeftDown","RightUp","RightDown"};
 const int ACTION_CODES[ACTION_COUNT][ACTION_CODE_COUNT]={
-                    {9999}, //Invalid
-                    {2199,9921,2121,/*2131,3121,3132,3231*/},/* LEFT    21 99 21 (容错) 21 31 31 32
-                                                                    99 21 21 (容错) 31 21 32 31*/
-                    {1299,9912,1212,/*1323,2313,1213,1312*/},/* RIGHT   12 99 12 (容错) 13 23 12 13
-                                                                    99 12 12 (容错) 23 13 13 12 */
-                    {2919,9291,2211,/*2311,3211,3312,3321*/},/* UP      29 92 22 (容错) 23 32 33 33
-                                                                    19 91 11 (容错) 11 11 12 21  */
-                    {1929,9192,1122,/*1123,1132,1233,2133*/},/* DOWN    19 91 11 (容错) 11 11 12 21
-                                                                    29 92 22 (容错) 23 32 33 33  */
-                    {3221,4321,4231,3921,3291},/* LEFT_UP    32 43 42 39 32
-                                                             21 21 31 21 91  */
-                    {2132,2143,3142,2139,9132},/* LEFT_DOWN  21 21 31 21 91
-                                                             32 43 42 39 32  */
-                    {2312,2319,9312,3412,2413},/* RIGHT_UP   23 23 93 34 24
-                                                             12 19 12 12 13  */
-                    {1324,1234,1223,1293,1923} /*RIGHT_DOWN  13 12 12 12 19
-                                                             24 34 23 93 23  */
+                    {0000}, //Invalid
+                    {5151,5152,5161,5162, 5251,5252,5261,5262,  6151,6152,6161,6162, 6251,6252,6261,6262},
+                    {1515,1516,1525,1526, 1615,1616,1625,1626,  2515,2516,2525,2526, 2615,2616,2625,2626},
+                    {5511,5512,5521,5522, 5611,5612,5621,5622,  5511,5512,5521,5522, 5611,5612,5621,5622},
+                    {1155,1156,1165,1166, 1255,1256,1265,1266,  2155,2156,2165,2166, 2255,2256,2265,2266},
+                    {6331,6341,6431,6441,/*容错*//* 6321,6231,6421,6241,  6351,6531,6451,6251*/},
+                    {3163,3164,4163,4164,/*容错*//* 3162,2163,4162,2164,  3165,5163,4153,2561*/},
+                    {3613,3614,4613,4614,/*容错*//*3612,2613,4612,2614,  3615,5613,4615,2651*/},
+                    {1336,1346,1436,1446,/*容错*//* 1326,1236,1426,1246,  1356,1536,1456,1256*/} 
             };
 //传感器输入pin，数组下标按照从左到右、从上到下方式排列
 const int INPUT_PIN[SENSOR_COUNT] = {A1, A2, A3, A4};
@@ -40,22 +32,19 @@ const int LOOP_DELAY = 1;
 //计算平均电压的时间区间，转换为sample次数,设置为100秒，该值只影响取平均值的平滑度
 const float AVG_V_SAMPLE_COUNT = 100.0f * 1000 / LOOP_DELAY;
 //手势动作最大的时间区间，超过这个时间的波峰将被忽略掉
-const long PEAK_ACTION_PERIOD=3000;
+const uint64_t PEAK_ACTION_PERIOD=3000000;
 //波峰电压只要需要高出平均电压多少
 float MIN_PEAK_CUR_V_RATE = 1.1f;
 
 //不同传感器之间取样间隔
 const int SAMPLE_DELAY = 0;
-
-
-
 //判断波峰的最小值，相对于平均值的比例
 const float MIN_PEAK_V_RATE = 1.2f;
 //判断波峰的最小值，相对于平均值增加的数量
 const int MIN_PEAK_V_AMOUNT = 50;
 
 //上次打印debug时间，用于控制debug输出内容的时间间隔
-unsigned long lastDebugTime=0;
+uint64_t lastDebugTime=0;
 
 //排序用时间数组
 struct Sensor {
@@ -63,8 +52,13 @@ struct Sensor {
   float curV;//当前电压
   float avgV;//平均电压
   float peakV;//最大电压
-  unsigned long peakVTime;//传感器最大波峰时间(ms)
-  int order;//实际顺序，两个传感器序号可能相同。最早的传感器为1，如果某个传感器没有波峰，则设置为9
+  uint64_t peakVTime;//传感器最大波峰时间(微秒)
+  int peakOrder;//最大波峰顺序，两个传感器序号可能相同。最早的传感器为1，如果某个传感器没有波峰，则设置为0
+  uint64_t entryTime;//传感器波峰进入时间(微秒)
+  int entryOrder;//进入波峰顺序，两个传感器序号可能相同。最早的传感器为1，如果某个传感器没有波峰，则设置为0
+  uint64_t exitTime;//离开波峰时间(微秒)
+  int exitOrder;//离开波峰顺序，两个传感器序号可能相同。最早的传感器为1，如果某个传感器没有波峰，则设置为0
+  //使用entry/peak/exit三个时间和顺序，通过三套方式进行判断，提高准确度
 };
 Sensor sensors[SENSOR_COUNT];
 
@@ -75,7 +69,11 @@ void initVArray() {
     sensors[i].avgV = 0;
     sensors[i].peakV = 0;
     sensors[i].peakVTime = 0;
-    sensors[i].order = 0;
+    sensors[i].peakOrder = 0;
+    sensors[i].entryTime = 0;
+    sensors[i].entryOrder = 0;
+    sensors[i].exitTime = 0;
+    sensors[i].exitOrder = 0;
   }
 }
 void setup() {
@@ -95,13 +93,15 @@ int isAboveAvgV(Sensor &s){
 }
 //读取所有传感器的电压，放在最后一个位置
 void readSensorData() {
-  unsigned long t = millis();
+  uint64_t t = micros();
   //  shiftSensorData();
   for (int s = 0; s < SENSOR_COUNT; s++) {
     //清理掉PEAK_ACTION_PERIOD之前的数据
     if(sensors[s].peakV>0&&t-sensors[s].peakVTime>PEAK_ACTION_PERIOD){
        sensors[s].peakV = 0;
        sensors[s].peakVTime = 0;
+       sensors[s].entryTime = 0;
+       sensors[s].exitTime = 0;
     }
     //读取数据
     sensors[s].curV = analogRead(INPUT_PIN[s]);
@@ -112,10 +112,19 @@ void readSensorData() {
       sensors[s].avgV = (sensors[s].avgV * (AVG_V_SAMPLE_COUNT - 1) + sensors[s].curV) / AVG_V_SAMPLE_COUNT;
     }
     //电压超过平均值的y%，才设置波峰
-    if (sensors[s].curV > sensors[s].peakV
-    && isAboveAvgV(sensors[s])) {
-      sensors[s].peakV = sensors[s].curV;
-      sensors[s].peakVTime = t;
+    if(isAboveAvgV(sensors[s])){
+      if (sensors[s].curV > sensors[s].peakV ) {//设置波峰
+        sensors[s].peakV = sensors[s].curV;
+        sensors[s].peakVTime = t;
+      }
+      if (sensors[s].entryTime==0 ) {//设置进入时间
+        sensors[s].entryTime = t;
+      }
+    }
+    else{
+      if (sensors[s].exitTime==0&&sensors[s].entryTime>0 ) {//设置离开时间
+        sensors[s].exitTime = t;
+      }
     }
   }
 }
@@ -127,9 +136,11 @@ void printSensorData(int printInfo,String info,Sensor sensors[]){
   }
   for (int i = 0; i < SENSOR_COUNT; i++) {
     int sensorId=sensors[i].sensorId;
-    Serial.println(SENSOR_NAMES[sensorId]+"   sensorId:"+sensorId+"   cur:"+sensors[i].curV+"   peakV:"+sensors[i].peakV+"   avgV:"+sensors[i].avgV+"   peakVTime:"
-    +(sensors[i].peakVTime/1000)+(".")+(sensors[i].peakVTime % 1000)
-    +"   order:"+sensors[i].order);
+    Serial.println(SENSOR_NAMES[sensorId]+"   sensorId:"+sensorId+"   cur:"+sensors[i].curV+"   peakV:"+sensors[i].peakV+"   avgV:"+sensors[i].avgV
+      +"   entryTime:" +((double)sensors[i].entryTime/1000)+"   entryOrder:"+sensors[i].entryOrder
+      +"   peakVTime:" +((double)sensors[i].peakVTime/1000)+"   peakOrder:"+sensors[i].peakOrder
+      +"   exitTime:" +((double)sensors[i].exitTime/1000)+"   exitOrder:"+sensors[i].exitOrder
+      );
   }
 
 }
@@ -170,12 +181,12 @@ void sendAction(int actionId) {
 /**
  * 按peak进行排序
  */
-void sort(){
+void sortPeak(){
    //获取开始/结束时间
-  unsigned long startTime=sensors[0].peakVTime;
-  unsigned long endTime =sensors[0].peakVTime;
+  uint64_t startTime=sensors[0].peakVTime;
+  uint64_t endTime =sensors[0].peakVTime;
   for (int i = 1; i < SENSOR_COUNT; i++) {
-    unsigned long peakTime=sensors[i].peakVTime;
+    uint64_t peakTime=sensors[i].peakVTime;
     if (peakTime > 0) {
         if(peakTime<startTime){
           startTime=peakTime;
@@ -186,8 +197,11 @@ void sort(){
     }
   }
   //排序
-  long totalTime=endTime-startTime;
-  Serial.print("startTime:");Serial.print(startTime);Serial.print(",endTime:");Serial.print(endTime);Serial.print(",totalTime:");Serial.println(totalTime);
+  uint64_t totalTime=endTime-startTime;
+//  Serial.print("startTime:");Serial.print(startTime);Serial.print(",endTime:");Serial.print(endTime);Serial.print(",totalTime:");Serial.println(totalTime);
+  if(totalTime==0){
+    return;
+  }
   for (int i = 0; i < SENSOR_COUNT; i++) {
     //根据时间偏移，除以分片时间，直接获取序号，从1开始
     int order;
@@ -195,30 +209,148 @@ void sort(){
       order=0;
     }
     else{
-      long timeOffset=sensors[i].peakVTime-startTime;
+      uint64_t timeOffset=sensors[i].peakVTime-startTime;
       order=timeOffset*TIME_SPLITS/totalTime+1;
       if(order>TIME_SPLITS){
         order=TIME_SPLITS;//最后一个设置为TIME_SPLITS
       }
     }
-    sensors[i].order = order;
+    sensors[i].peakOrder = order;
+  }
+}
+/**
+ * 按entry进行排序
+ */
+void sortEntry(){
+   //获取开始/结束时间
+  uint64_t startTime=sensors[0].entryTime;
+  uint64_t endTime =sensors[0].entryTime;
+  for (int i = 1; i < SENSOR_COUNT; i++) {
+    uint64_t entryTime=sensors[i].entryTime;
+    if (entryTime > 0) {
+        if(entryTime<startTime){
+          startTime=entryTime;
+        }
+        if(entryTime>endTime){
+          endTime=entryTime;
+        }
+    }
+  }
+  //排序
+  uint64_t totalTime=endTime-startTime;
+//  Serial.print("startTime:");Serial.print(startTime);Serial.print(",endTime:");Serial.print(endTime);Serial.print(",totalTime:");Serial.println(totalTime);
+  if(totalTime==0){
+    return;
+  }
+  for (int i = 0; i < SENSOR_COUNT; i++) {
+    //根据时间偏移，除以分片时间，直接获取序号，从1开始
+    int order;
+    if(sensors[i].entryTime==0){
+      order=0;
+    }
+    else{
+      uint64_t timeOffset=sensors[i].entryTime-startTime;
+      order=timeOffset*TIME_SPLITS/totalTime+1;
+      if(order>TIME_SPLITS){
+        order=TIME_SPLITS;//最后一个设置为TIME_SPLITS
+      }
+    }
+    sensors[i].entryOrder = order;
+  }
+}
+
+/**
+ * 按exit进行排序
+ */
+void sortExit(){
+   //获取开始/结束时间
+  uint64_t startTime=sensors[0].exitTime;
+  uint64_t endTime =sensors[0].exitTime;
+  for (int i = 1; i < SENSOR_COUNT; i++) {
+    uint64_t exitTime=sensors[i].exitTime;
+    if (exitTime > 0) {
+        if(exitTime<startTime){
+          startTime=exitTime;
+        }
+        if(exitTime>endTime){
+          endTime=exitTime;
+        }
+    }
+  }
+  //排序
+  uint64_t totalTime=endTime-startTime;
+//  Serial.print("startTime:");Serial.print(startTime);Serial.print(",endTime:");Serial.print(endTime);Serial.print(",totalTime:");Serial.println(totalTime);
+  if(totalTime==0){
+    return;
+  }
+  for (int i = 0; i < SENSOR_COUNT; i++) {
+    //根据时间偏移，除以分片时间，直接获取序号，从1开始
+    int order;
+    if(sensors[i].exitTime==0){
+      order=0;
+    }
+    else{
+      uint64_t timeOffset=sensors[i].exitTime-startTime;
+      order=timeOffset*TIME_SPLITS/totalTime+1;
+      if(order>TIME_SPLITS){
+        order=TIME_SPLITS;//最后一个设置为TIME_SPLITS
+      }
+    }
+    sensors[i].exitOrder = order;
   }
 }
 //将排序结果转换为整数类型的action，
 int covertToActionId(){
-  int actionCode=0;
+  int peakActionCode=0;
+  int entryActionCode=0;
+  int exitActionCode=0;
+  int peakAction;
+  int entryAction;
+  int exitAction;
   for(int i=0;i<SENSOR_COUNT;i++){
-    actionCode=actionCode*10+sensors[i].order;
+    peakActionCode=peakActionCode*10+sensors[i].peakOrder;
+    entryActionCode=entryActionCode*10+sensors[i].entryOrder;
+    exitActionCode=exitActionCode*10+sensors[i].exitOrder;
   }
   
-  Serial.println(actionCode);
   for(int i=0;i<ACTION_COUNT;i++){
     for(int j=0;j<ACTION_CODE_COUNT;j++){
-      if(ACTION_CODES[i][j]==actionCode){
-        return i;
+      if(ACTION_CODES[i][j]==peakActionCode){
+        peakAction=i;
+      }
+      if(ACTION_CODES[i][j]==entryActionCode){
+        entryAction=i;
+      }
+      if(ACTION_CODES[i][j]==entryActionCode){
+        exitAction=i;
       }
     }
   }
+  Serial.print("entryActionCode:");Serial.print(entryActionCode);Serial.print(",");Serial.println(ACTION_NAMES[entryAction]);
+  Serial.print("peakActionCode :");Serial.print(peakActionCode);Serial.print(",");Serial.println(ACTION_NAMES[peakAction]);
+  Serial.print("exitActionCode :");Serial.print(exitActionCode);Serial.print(",");Serial.println(ACTION_NAMES[exitAction]);
+
+  //如果某个action出现两次，则返回。
+  if(peakAction>0&&(entryAction==peakAction||exitAction==peakAction)){
+    return peakAction;
+  }
+  if(entryAction>0&&(peakAction==entryAction||exitAction==entryAction)){
+    return entryAction;
+  }
+  if(exitAction>0&&(peakAction==exitAction||exitAction==entryAction)){
+    return exitAction;
+  }
+  //如果没有出现两次的action，则返回一次的action，按照peak/entry/exit顺序返回
+  if(peakAction>0){
+    return peakAction;
+  }
+  if(entryAction>0){
+    return entryAction;
+  }
+  if(exitAction>0){
+    return exitAction;
+  }
+  
   return 0;//如果未找到，return 0
 }
 
@@ -227,7 +359,11 @@ void resetSensorData() {
     sensors[i].curV = 0;
     sensors[i].peakV = 0;
     sensors[i].peakVTime = 0;
-    sensors[i].order = 0;
+    sensors[i].peakOrder = 0;
+    sensors[i].entryTime = 0;
+    sensors[i].entryOrder = 0;
+    sensors[i].exitTime = 0;
+    sensors[i].exitOrder = 0;
   }
 }
 
@@ -235,18 +371,20 @@ void loop() {
   readSensorData();
   if (hasCompletedAction()) {
     Serial.println("New Action");
-    sort();
+    sortEntry();
+    sortPeak();
+    sortExit();
     printSensorData(0,"",sensors);
     int action =covertToActionId();
     sendAction(action);
     resetSensorData();
   }
-  unsigned long t = millis();
-  if(t-lastDebugTime>2000){
+  uint64_t t = micros();
+  if(t-lastDebugTime>2000000){
     Serial.println("No Action.");
     lastDebugTime=t;
   }
   //delay(LOOP_DELAY);
-    delay(1);
+    delayMicroseconds( 100 );
 }
 
