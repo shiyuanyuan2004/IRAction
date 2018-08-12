@@ -9,8 +9,11 @@
 const int SENSOR_COUNT = 4;
 const int ACTION_COUNT=9;
 const int ACTION_CODE_COUNT=16;
-const int TIME_SPLITS=6;//将整个action时间平分为6份,再多的话训练数据量太多
+const int TIME_SPLITS=99;//将整个action时间平分为99份
+const double H_V_OFFSET_RATE=0.20;//水平、垂直方向的最大角度偏差
 const String ACTION_NAMES[9]={"Invalid","Left","Right","Up","Down","LeftUp","LeftDown","RightUp","RightDown"};
+const int ACTION_INVALID=0,ACTION_LEFT=1,ACTION_RIGHT=2,ACTION_UP=3,ACTION_DOWN=4,ACTION_LEFT_UP=5,ACTION_LEFT_DOWN=6,ACTION_RIGHT_UP=7,ACTION_RIGHT_DOWN=8;
+const int S11=0,S12=1,S21=2,S22=3;
 //传感器输入pin，数组下标按照从左到右、从上到下方式排列
 const int INPUT_PIN[SENSOR_COUNT] = {A1, A2, A3, A4};
 const String SENSOR_NAMES[SENSOR_COUNT] = {"S_1_1", "S_1_2", "S_2_1", "S_2_2"};
@@ -43,10 +46,20 @@ struct Sensor {
   float avgV;//平均电压
   float peakV;//最大电压
   uint64_t peakVTime[3];//传感器波峰时间(微秒),Entry/Peak/Exit
-  int peakOrder;//波峰顺序,Entry/Peak/Exit，两个传感器序号可能相同。最早的传感器为1，如果某个传感器没有波峰，则设置为0
+  int peakOrder[3];//波峰顺序,Entry/Peak/Exit，两个传感器序号可能相同。最早的传感器为1，如果某个传感器没有波峰，则设置为0
   //使用entry/peak/exit三个时间和顺序，通过三套方式进行判断，提高准确度
 };
 Sensor sensors[SENSOR_COUNT];
+void resetSensorData() {
+  for (int i = 0; i < SENSOR_COUNT; i++) {
+    sensors[i].curV = 0;
+    sensors[i].peakV = 0;
+    for(int n=0;n<=2;n++){
+      sensors[i].peakVTime[n] = 0;
+      sensors[i].peakOrder[n] = 0;
+    }
+  }
+}
 
 void initVArray() {
   for (int i = 0; i < SENSOR_COUNT; i++) {
@@ -54,12 +67,10 @@ void initVArray() {
     sensors[i].curV = 0;
     sensors[i].avgV = 0;
     sensors[i].peakV = 0;
-    sensors[i].peakVTime = 0;
-    sensors[i].peakOrder = 0;
-    sensors[i].entryTime = 0;
-    sensors[i].entryOrder = 0;
-    sensors[i].exitTime = 0;
-    sensors[i].exitOrder = 0;
+    for(int n=0;n<=2;n++){
+      sensors[i].peakVTime[n]=0;
+      sensors[i].peakOrder[n]=0;
+    }
   }
 }
 void setup() {
@@ -83,7 +94,7 @@ void readSensorData() {
   //  shiftSensorData();
   for (int s = 0; s < SENSOR_COUNT; s++) {
     //清理掉PEAK_ACTION_PERIOD之前的数据
-    if(sensors[s].peakV>0&&t-sensors[s].peakVTime>PEAK_ACTION_PERIOD){
+    if(sensors[s].peakV>0&&t-sensors[s].peakVTime[PEAK]>PEAK_ACTION_PERIOD){
        sensors[s].peakV = 0;
        for(int i=0;i<=2;i++){
         sensors[s].peakVTime[i] = 0;
@@ -109,7 +120,7 @@ void readSensorData() {
     }
     else{
       if (sensors[s].peakVTime[EXIT]==0&&sensors[s].peakVTime[ENTRY]>0 ) {//设置离开时间
-        sensors[s].peakVTime[ENTRY] = t;
+        sensors[s].peakVTime[EXIT] = t;
       }
     }
   }
@@ -123,9 +134,9 @@ void printSensorData(int printInfo,String info,Sensor sensors[]){
   for (int i = 0; i < SENSOR_COUNT; i++) {
     int sensorId=sensors[i].sensorId;
     Serial.println(SENSOR_NAMES[sensorId]+"   sensorId:"+sensorId+"   cur:"+sensors[i].curV+"   peakV:"+sensors[i].peakV+"   avgV:"+sensors[i].avgV
-      +"   entryTime:" +((double)sensors[s].peakVTime[ENTRY]/1000)+"   entryOrder:"+sensors[i].peakOrder[ENTRY]
-      +"   peakVTime:" +((double)sensors[s].peakVTime[PEAK]/1000)+"   peakOrder:"+sensors[i].peakOrder[PEAK]
-      +"   exitTime:" +((double)sensors[s].peakVTime[EXIT]/1000)+"   exitOrder:"+sensors[i].peakOrder[EXIT]
+      +"   entryTime:" +((double)sensors[i].peakVTime[ENTRY]/1000)+"   entryOrder:"+sensors[i].peakOrder[ENTRY]
+      +"   peakVTime:" +((double)sensors[i].peakVTime[PEAK]/1000)+"   peakOrder:"+sensors[i].peakOrder[PEAK]
+      +"   exitTime:" +((double)sensors[i].peakVTime[EXIT]/1000)+"   exitOrder:"+sensors[i].peakOrder[EXIT]
       );
   }
 
@@ -187,7 +198,7 @@ void sort(){
     uint64_t totalTime=endTime-startTime;
   //  Serial.print("startTime:");Serial.print(startTime);Serial.print(",endTime:");Serial.print(endTime);Serial.print(",totalTime:");Serial.println(totalTime);
     if(totalTime==0){
-      return;
+      continue;
     }
     for (int i = 0; i < SENSOR_COUNT; i++) {
       //根据时间偏移，除以分片时间，直接获取序号，从1开始
@@ -198,89 +209,103 @@ void sort(){
       else{
         uint64_t timeOffset=sensors[i].peakVTime[n]-startTime;
         order=timeOffset*TIME_SPLITS/totalTime+1;
-        if(order>TIME_SPLITS){
-          order=TIME_SPLITS;//最后一个设置为TIME_SPLITS
-        }
       }
-      sensors[i].peakOrder = order;
+      sensors[i].peakOrder[n] = order;
     }
   }
 }
 //将排序结果转换为整数类型的action，
 int covertToActionId(){
-  int peakActionCode=0;
-  int entryActionCode=0;
-  int exitActionCode=0;
-  int peakAction;
-  int entryAction;
-  int exitAction;
-  for(int i=0;i<SENSOR_COUNT;i++){
-    peakActionCode=peakActionCode*10+sensors[i].peakOrder;
-    entryActionCode=entryActionCode*10+sensors[i].entryOrder;
-    exitActionCode=exitActionCode*10+sensors[i].exitOrder;
-  }
-  
-  for(int i=0;i<ACTION_COUNT;i++){
-    for(int j=0;j<ACTION_CODE_COUNT;j++){
-      if(ACTION_CODES[i][j]==peakActionCode){
-        peakAction=i;
-      }
-      if(ACTION_CODES[i][j]==entryActionCode){
-        entryAction=i;
-      }
-      if(ACTION_CODES[i][j]==entryActionCode){
-        exitAction=i;
-      }
+  int actions[3]={ACTION_INVALID};
+  int offset=TIME_SPLITS*H_V_OFFSET_RATE;
+  Serial.print("Offset:");Serial.println(offset);
+  for(int n=0;n<=2;n++){
+//const int ACTION_INVALID=0,ACTION_LEFT=1,ACTION_RIGHT=2,ACTION_UP=3,ACTION_DOWN=4,ACTION_LEFT_UP=5,ACTION_LEFT_DOWN=6,ACTION_RIGHT_UP=7,ACTION_RIGHT_DOWN=8;
+    if(sensors[S11].peakOrder[n]< offset && sensors[S21].peakOrder[n]< offset  
+      &sensors[S12].peakOrder[n]>TIME_SPLITS-offset && sensors[S22].peakOrder[n]>TIME_SPLITS-offset){
+        //左边两个传感器在前offset时间段，右边两个传感器在后offset时间段，
+        actions[n]=ACTION_RIGHT;
     }
+    if(sensors[S12].peakOrder[n]< offset && sensors[S22].peakOrder[n]< offset  
+      &sensors[S11].peakOrder[n]>TIME_SPLITS-offset && sensors[S21].peakOrder[n]>TIME_SPLITS-offset){
+        //右边两个传感器在前offset时间段，左边两个传感器在后offset时间段，
+        actions[n]=ACTION_LEFT;
+    }
+    if(sensors[S11].peakOrder[n]< offset && sensors[S12].peakOrder[n]< offset  
+      &sensors[S21].peakOrder[n]>TIME_SPLITS-offset&& sensors[S22].peakOrder[n]>TIME_SPLITS-offset){
+        //上边两个传感器在前offset时间段，下边两个传感器在后offset时间段，
+        actions[n]=ACTION_DOWN;
+    }
+    if(sensors[S21].peakOrder[n]< offset && sensors[S22].peakOrder[n]< offset  
+      &&sensors[S11].peakOrder[n]>TIME_SPLITS-offset && sensors[S12].peakOrder[n]>TIME_SPLITS-offset){
+        //下边两个传感器在前offset时间段，上边两个传感器在后offset时间段，
+        actions[n]=ACTION_UP;
+    }
+    if(sensors[S11].peakOrder[n]< offset && sensors[S22].peakOrder[n]> TIME_SPLITS-offset 
+      &&sensors[S12].peakOrder[n]>=offset && sensors[S12].peakOrder[n]<=TIME_SPLITS-offset
+      &&sensors[S21].peakOrder[n]>=offset && sensors[S21].peakOrder[n]<=TIME_SPLITS-offset
+      ){
+        //左上传感器在前offset时间段，右下传感器在后offset时间段，其余在中间时间段
+        actions[n]=ACTION_RIGHT_DOWN;
+    }
+    if(sensors[S22].peakOrder[n]< offset && sensors[S11].peakOrder[n]> TIME_SPLITS-offset 
+      &&sensors[S12].peakOrder[n]>=offset && sensors[S12].peakOrder[n]<=TIME_SPLITS-offset
+      &&sensors[S21].peakOrder[n]>=offset && sensors[S21].peakOrder[n]<=TIME_SPLITS-offset
+      ){
+        //右下传感器在前offset时间段，左上传感器在后offset时间段，其余在中间时间段
+        actions[n]=ACTION_LEFT_UP;
+    }
+    if(sensors[S12].peakOrder[n]< offset && sensors[S21].peakOrder[n]> TIME_SPLITS-offset 
+      &&sensors[S11].peakOrder[n]>=offset && sensors[S11].peakOrder[n]<=TIME_SPLITS-offset
+      &&sensors[S22].peakOrder[n]>=offset && sensors[S22].peakOrder[n]<=TIME_SPLITS-offset
+      ){
+        //右上传感器在前offset时间段，左下传感器在后offset时间段，其余在中间时间段
+        actions[n]=ACTION_LEFT_DOWN;
+    }
+    if(sensors[S21].peakOrder[n]< offset && sensors[S12].peakOrder[n]> TIME_SPLITS-offset 
+      &&sensors[S11].peakOrder[n]>=offset && sensors[S11].peakOrder[n]<=TIME_SPLITS-offset
+      &&sensors[S22].peakOrder[n]>=offset && sensors[S22].peakOrder[n]<=TIME_SPLITS-offset
+      ){
+        //左下传感器在前offset时间段，右上传感器在后offset时间段，其余在中间时间段
+        actions[n]=ACTION_RIGHT_UP;
+    }
+    
   }
-  Serial.print("entryActionCode:");Serial.print(entryActionCode);Serial.print(",");Serial.println(ACTION_NAMES[entryAction]);
-  Serial.print("peakActionCode :");Serial.print(peakActionCode);Serial.print(",");Serial.println(ACTION_NAMES[peakAction]);
-  Serial.print("exitActionCode :");Serial.print(exitActionCode);Serial.print(",");Serial.println(ACTION_NAMES[exitAction]);
+  Serial.print("actions[ENTRY]:");Serial.println(ACTION_NAMES[actions[ENTRY]]);
+  Serial.print("actions[PEAK] :");Serial.println(ACTION_NAMES[actions[PEAK]]);
+  Serial.print("actions[EXIT] :");Serial.println(ACTION_NAMES[actions[EXIT]]);
 
   //如果某个action出现两次，则返回。
-  if(peakAction>0&&(entryAction==peakAction||exitAction==peakAction)){
-    return peakAction;
+  if(actions[PEAK]>0&&(actions[ENTRY]==actions[PEAK]||actions[EXIT]==actions[PEAK])){
+    return actions[PEAK];
   }
-  if(entryAction>0&&(peakAction==entryAction||exitAction==entryAction)){
-    return entryAction;
+  if(actions[ENTRY]>0&&(actions[PEAK]==actions[ENTRY]||actions[EXIT]==actions[ENTRY])){
+    return actions[ENTRY];
   }
-  if(exitAction>0&&(peakAction==exitAction||exitAction==entryAction)){
-    return exitAction;
+  if(actions[EXIT]>0&&(actions[PEAK]==actions[EXIT]||actions[EXIT]==actions[ENTRY])){
+    return actions[EXIT];
   }
   //如果没有出现两次的action，则返回一次的action，按照peak/entry/exit顺序返回
-  if(peakAction>0){
-    return peakAction;
+  //TODO 如果有斜向的action出现，则优先返回
+  if(actions[PEAK]>0){
+    return actions[PEAK];
   }
-  if(entryAction>0){
-    return entryAction;
+  if(actions[ENTRY]>0){
+    return actions[ENTRY];
   }
-  if(exitAction>0){
-    return exitAction;
+  if(actions[EXIT]>0){
+    return actions[EXIT];
   }
   
   return 0;//如果未找到，return 0
 }
 
-void resetSensorData() {
-  for (int i = 0; i < SENSOR_COUNT; i++) {
-    sensors[i].curV = 0;
-    sensors[i].peakV = 0;
-    sensors[i].peakVTime = 0;
-    sensors[i].peakOrder = 0;
-    sensors[i].entryTime = 0;
-    sensors[i].entryOrder = 0;
-    sensors[i].exitTime = 0;
-    sensors[i].exitOrder = 0;
-  }
-}
 
 void loop() {
   readSensorData();
   if (hasCompletedAction()) {
     Serial.println("New Action");
-    sortEntry();
-    sortPeak();
-    sortExit();
+    sort();
     printSensorData(0,"",sensors);
     int action =covertToActionId();
     sendAction(action);
