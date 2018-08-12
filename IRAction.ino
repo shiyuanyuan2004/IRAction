@@ -21,7 +21,7 @@ const String SENSOR_NAMES[SENSOR_COUNT] = {"S_1_1", "S_1_2", "S_2_1", "S_2_2"};
 const int LOOP_DELAY = 1;
 
 //计算平均电压的时间区间，转换为sample次数,设置为100秒，该值只影响取平均值的平滑度
-const float AVG_V_SAMPLE_COUNT = 100.0f * 1000 / LOOP_DELAY;
+const float AVG_V_SAMPLE_COUNT = 100.0f * 1000*100 / LOOP_DELAY;
 //手势动作最大的时间区间，超过这个时间的波峰将被忽略掉
 const uint64_t PEAK_ACTION_PERIOD=3000000;
 //波峰电压只要需要高出平均电压多少
@@ -181,17 +181,23 @@ void sendAction(int actionId) {
 void sort(){
   for(int n=0;n<=2;n++){//分别排序Entry/Peak/Exit
      //获取开始/结束时间
-    uint64_t startTime=sensors[0].peakVTime[n];
-    uint64_t endTime =sensors[0].peakVTime[n];
-    for (int i = 1; i < SENSOR_COUNT; i++) {
+    uint64_t startTime=0;
+    uint64_t endTime =0;
+    for (int i = 0; i < SENSOR_COUNT; i++) {
       uint64_t peakTime=sensors[i].peakVTime[n];
       if (peakTime > 0) {
-          if(peakTime<startTime){
-            startTime=peakTime;
-          }
-          if(peakTime>endTime){
-            endTime=peakTime;
-          }
+        if(startTime==0){
+          startTime=peakTime;
+        }
+        else if(peakTime<startTime){
+          startTime=peakTime;
+        }
+        if(endTime==0){
+          endTime=peakTime;
+        }
+        else if(peakTime>endTime){
+          endTime=peakTime;
+        }
       }
     }
     //排序
@@ -203,7 +209,7 @@ void sort(){
     for (int i = 0; i < SENSOR_COUNT; i++) {
       //根据时间偏移，除以分片时间，直接获取序号，从1开始
       int order;
-      if(sensors[i].peakVTime==0){
+      if(sensors[i].peakVTime[n]==0){
         order=0;
       }
       else{
@@ -285,8 +291,13 @@ int covertToActionId(){
   if(actions[EXIT]>0&&(actions[PEAK]==actions[EXIT]||actions[EXIT]==actions[ENTRY])){
     return actions[EXIT];
   }
-  //如果没有出现两次的action，则返回一次的action，按照peak/entry/exit顺序返回
-  //TODO 如果有斜向的action出现，则优先返回
+  //如果有斜向的action出现，则优先返回
+  for(int n=0;n<=2;n++){
+    if(actions[n]>=5){
+      return actions[n];
+    }
+  }
+  //如果没有出现两次的action，或者斜向action，按照peak/entry/exit顺序返回
   if(actions[PEAK]>0){
     return actions[PEAK];
   }
@@ -312,11 +323,11 @@ void loop() {
     resetSensorData();
   }
   uint64_t t = micros();
-  if(t-lastDebugTime>2000000){
+  if(t-lastDebugTime>2*1000*1000){
     Serial.println("No Action.");
     lastDebugTime=t;
   }
   //delay(LOOP_DELAY);
-    delayMicroseconds( 100 );
+    delayMicroseconds( 10 );
 }
 
