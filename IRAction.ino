@@ -46,7 +46,7 @@ float MIN_PEAK_CUR_V_RATE = 1.1f;
 //不同传感器之间取样间隔
 const int SAMPLE_DELAY = 0;
 
-
+//test
 
 //判断波峰的最小值，相对于平均值的比例
 const float MIN_PEAK_V_RATE = 1.2f;
