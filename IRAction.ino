@@ -23,7 +23,7 @@ const int LOOP_DELAY = 10;
 //计算平均电压的时间区间，转换为sample次数,设置为100秒，该值只影响取平均值的平滑度
 const float AVG_V_SAMPLE_COUNT = 100.0f * 1000  / LOOP_DELAY;
 //手势动作最大的时间区间，超过这个时间的波峰将被忽略掉
-const uint64_t PEAK_ACTION_PERIOD = 3000000;
+const uint64_t PEAK_ACTION_PERIOD = 3000000;//微秒
 
 //不同传感器之间取样间隔
 const int SAMPLE_DELAY = 0;
