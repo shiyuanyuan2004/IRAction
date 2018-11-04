@@ -39,19 +39,10 @@ const int LOOP_DELAY = 1;
 //计算平均电压的时间区间，转换为sample次数,设置为100秒，该值只影响取平均值的平滑度
 const float AVG_V_SAMPLE_COUNT = 100.0f * 1000 / LOOP_DELAY;
 //手势动作最大的时间区间，超过这个时间的波峰将被忽略掉
-const long PEAK_ACTION_PERIOD=3000;
-//波峰电压只要需要高出平均电压多少
-float MIN_PEAK_CUR_V_RATE = 1.1f;
 
-//不同传感器之间取样间隔
-const int SAMPLE_DELAY = 0;
 
-//test
 
-//判断波峰的最小值，相对于平均值的比例
-const float MIN_PEAK_V_RATE = 1.2f;
-//判断波峰的最小值，相对于平均值增加的数量
-const int MIN_PEAK_V_AMOUNT = 50;
+
 
 //判断两个传感器先后顺序的最小间隔时间比例，以整个手势时间为基准。用于容错处理，允许少于的方向偏差
 const float MIN_SENSOR_PERIOD_RATE = 0.15f;
@@ -89,9 +80,10 @@ void setup() {
   Serial.println("Started!");
   initVArray();
 }
-//判断当前电压是否高出平均值的阈值，满足PeakV基本条件
+//判断当前电压是否高出平均值
 int isAboveAvgV(Sensor &s){
- if( s.curV > s.avgV*MIN_PEAK_V_RATE&&s.curV>s.avgV+MIN_PEAK_V_AMOUNT){
+  //判断波峰的最小值必须是平均值的1.5倍，并且要比平均值大50以上，避免误差
+ if( s.curV > s.avgV*1.2f&&s.curV>s.avgV+50){
     return 1;
  }
  else{
@@ -103,8 +95,8 @@ void readSensorData() {
   unsigned long t = millis();
   //  shiftSensorData();
   for (int s = 0; s < SENSOR_COUNT; s++) {
-    //清理掉PEAK_ACTION_PERIOD之前的数据
-    if(sensors[s].peakV>0&&t-sensors[s].peakVTime>PEAK_ACTION_PERIOD){
+    //清理掉3秒之前的数据，一个手势动作的最长时间不应该超过3秒
+      if(sensors[s].peakV>0&&t-sensors[s].peakVTime>3000){
        sensors[s].peakV = 0;
        sensors[s].peakVTime = 0;
     }
@@ -298,7 +290,7 @@ void loop() {
     Serial.println("No Action.");
     lastDebugTime=t;
   }
-  //delay(LOOP_DELAY);
+
     delay(1);
 }
 
