@@ -1,5 +1,8 @@
 //sensor重命名
 #include "Arduino.h"
+#include <IRremote.h>
+
+
 //不要使用自定义format函数，函数内字符串拼接有bug，导致死机
 /*
  * 红外传感器数目，2*2
@@ -7,34 +10,32 @@
  *  S1_1   S1_2
  *  S2_1   S2_2 
  */
+
 const int SENSOR_COUNT = 4;
 const int ACTION_COUNT=5;
-//将时间分为3等分
-const int ACTION_CODES[ACTION_COUNT][7]={//手势必须覆盖所有传感器
-                    {9999},  //Invalid
-                    {3131},/*3132,3231,2131,3121,2231,1322}, /* LEFT    31  31 32 21 31
-                                                                     31  32 31 31 21*/
-                    {1313},/*1213,1312,1323,2313,2213,3122}, /* RIGHT   13  12 13 13 23
-                                                                     13  13 12 23 13*/
-                    {3311},/*2311,3211,3312,3321,2312,2321}, /* UP      33  23 32 33 33
-                                                                     11  11 11 12 21*/
-                    {1133},/*1123,1132,1233,2133,1232,2123} /* DOWN     11  11 11 12 21
-                                                                     33  23 32 33 33 */
-            };
-
+const String ACTION_NAMES[5]={"Invalid","Left","Right","Up","Down"};
 //上次打印debug时间，用于控制debug输出内容的时间间隔
 unsigned long lastDebugTime=0;
+//红外遥控相关常亮
+int RECV_PIN = 11;
+//IRrecv irrecv(RECV_PIN);
+IRsend irsend;
+const long IR_STOP_RESUME=0xFF02FD;
+const long IR_NEXT=0xFFF00F;
+const long IR_PREVIOUS=0xFFA05F;
+const long IR_VOL_UP=0xFF40BF;
+const long IR_VOL_DOWN=0xFFE01F;
 
+long IR_CODES[6]={0,IR_PREVIOUS,IR_NEXT,IR_VOL_UP,IR_VOL_DOWN};
 //排序用时间数组
 struct Sensor {
   int sensorId;//传感器对应下标
   float curV;//当前电压
   float avgV;//平均电压
   float peakV;//最大电压
-  unsigned long peakVTime;//传感器最大波峰时间(ms)
+  unsigned long peakTime;//传感器最大波峰时间(ms)
   unsigned long entryTime;//传感器进入波峰时间(ms)
-  int peakOrder;//传感器所在时间段顺序，按波峰排序
-  int entryOrder;//传感器所在时间段顺序，按进入波分排序
+  unsigned long exitTime;//传感器结束波峰时间(ms)
 };
 
 Sensor sensors[SENSOR_COUNT];
@@ -45,28 +46,42 @@ void initVArray() {
     sensors[i].curV = 0;
     sensors[i].avgV = 0;
     sensors[i].peakV = 0;
-    sensors[i].peakVTime = 0;
+    sensors[i].peakTime = 0;
     sensors[i].entryTime = 0;
-    sensors[i].peakOrder = 0;
-    sensors[i].entryOrder = 0;
+    sensors[i].exitTime = 0;
   }
 }
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);
+  pinMode(2, OUTPUT);      // sets the digital pin as output
+  pinMode(3, OUTPUT);      // sets the digital pin as output
+  pinMode(4, OUTPUT);      // sets the digital pin as output
+  pinMode(5, OUTPUT);      // sets the digital pin as output
+
   Serial.println("Let's go!");
   initVArray();
 }
 //判断当前电压是否高出平均值
 int isAboveAvgV(Sensor s){
   //判断波峰的最小值必须是平均值的1.5倍，并且要比平均值大50以上，避免误差
- if( s.curV > s.avgV*1.2f&&s.curV>s.avgV+50){
+ if( s.curV > s.avgV*1.5f&&s.curV>s.avgV+50){
     return 1;
  }
  else{
   return 0;
  }
 }
+//判断当前电压是否回到平均值
+int isBacktoAvgV(Sensor s){
+ if( s.curV < s.avgV*1.2f){
+    return 1;
+ }
+ else{
+  return 0;
+ }
+}
+
 //读取所有传感器的电压，放在最后一个位置
 void readSensorData() {
   unsigned long t = millis();
@@ -74,32 +89,39 @@ void readSensorData() {
   //传感器输入pin，数组下标按照从左到右、从上到下方式排列
   const int INPUT_PIN[SENSOR_COUNT] = {A1, A2, A3, A4};
   
-  //计算最近100秒平均电压所需的取样次数，该值只影响取平均值的平滑度
-  const float AVG_V_SAMPLE_COUNT = 100.0f * 1000 ;
+  //计算最近10秒平均电压所需的取样次数，该值只影响取平均值的平滑度
+  const float AVG_V_SAMPLE_COUNT = 10.0f * 1000 ;
 
-  for (int s = 0; s < SENSOR_COUNT; s++) {
+  for (int i = 0; i < SENSOR_COUNT; i++) {
+    Sensor & s=sensors[i];
     //清理掉3秒之前的数据，一个手势动作的最长时间不应该超过3秒
-    if(sensors[s].peakV>0&&t-sensors[s].peakVTime>3000){
-       sensors[s].peakV = 0;
-       sensors[s].entryTime = 0;
-       sensors[s].peakVTime = 0;
+    if(s.peakV>0&&t-s.peakTime>3000){
+       s.peakV = 0;
+       s.entryTime = 0;
+       s.exitTime = 0;
+       s.peakTime = 0;
     }
     //读取数据
-    sensors[s].curV = analogRead(INPUT_PIN[s]);
-    if(sensors[s].avgV<0.1){
-      sensors[s].avgV=sensors[s].curV;
+    s.curV = analogRead(INPUT_PIN[i]);
+    if(s.avgV<0.1){
+      s.avgV=s.curV;
     }
     else{
-      sensors[s].avgV = (sensors[s].avgV * (AVG_V_SAMPLE_COUNT - 1) + sensors[s].curV) / AVG_V_SAMPLE_COUNT;
+      s.avgV = (s.avgV * (AVG_V_SAMPLE_COUNT - 1) + s.curV) / AVG_V_SAMPLE_COUNT;
     }
     //电压超过平均值的y%，才设置波峰
-    if(isAboveAvgV(sensors[s])){
-      if(sensors[s].entryTime==0){
-        sensors[s].entryTime=t;
+    if(isAboveAvgV(sensors[i])){
+      if(s.entryTime==0){
+        s.entryTime=t;
       }
-      if (sensors[s].curV > sensors[s].peakV   ) {
-        sensors[s].peakV = sensors[s].curV;
-        sensors[s].peakVTime = t;
+      if (s.curV > s.peakV   ) {
+        s.peakV = s.curV;
+        s.peakTime = t;
+      }
+    }
+    else if( isBacktoAvgV(sensors[i])){
+      if(s.exitTime==0&&s.entryTime>0){
+        s.exitTime=t;
       }
     }
   }
@@ -111,12 +133,12 @@ void printSensorData(int printInfo,String info,Sensor sensors[]){
   }
   const String SENSOR_NAMES[SENSOR_COUNT] = {"S_1_1", "S_1_2", "S_2_1", "S_2_2"};
   for (int i = 0; i < SENSOR_COUNT; i++) {
+    Sensor &s=sensors[i];
     int sensorId=sensors[i].sensorId;
-    Serial.println(SENSOR_NAMES[sensorId]+"  sensorId:"+sensorId+"  cur:"+(int)sensors[i].curV+"  peakV:"+(int)sensors[i].peakV+"  avgV:"+(int)sensors[i].avgV
-    +"  peakVTime:" +(sensors[i].peakVTime/1000)+(".")+(sensors[i].peakVTime % 1000)
-    +"  entryTime:" +(sensors[i].entryTime/1000)+(".")+(sensors[i].entryTime % 1000)
-    +"  peakOrder:"+sensors[i].peakOrder
-    +"  entryOrder:"+sensors[i].entryOrder
+    Serial.println(SENSOR_NAMES[sensorId]+"  sensorId:"+sensorId+"  cur:"+(int)s.curV+"  peakV:"+(int)s.peakV+"  avgV:"+(int)s.avgV
+    +"  entryTime:" +(s.entryTime/1000)+(".")+(s.entryTime % 1000)
+    +"  peakTime:" +(s.peakTime/1000)+(".")+(s.peakTime % 1000)
+    +"  exitTime:" +(s.exitTime/1000)+(".")+(s.exitTime % 1000)
     );
   }
 }
@@ -129,7 +151,7 @@ int hasCompletedAction() {
   //判断所有sensor当前电压不满足peak条件
   int hasPeak=0;
   for (int s = 0; s < SENSOR_COUNT; s++) {
-    if (isAboveAvgV(sensors[s])==1) {
+    if (!isBacktoAvgV(sensors[s])==1) {
       hasPeak=1;
       break;
     }
@@ -139,8 +161,8 @@ int hasCompletedAction() {
   }
   
   //至少有一个Sensor有peak值
-  for (int s = 0; s < SENSOR_COUNT; s++) {
-    if (sensors[s].peakV >0.1) {
+  for (int i = 0; i < SENSOR_COUNT; i++) {
+    if (sensors[i].peakV >0.1) {
       return 1;
     }
   }
@@ -152,124 +174,129 @@ int hasCompletedAction() {
    将识别出来的手势动作转换为红外信号发射
 */
 void sendAction(int actionId) {
-  const String ACTION_NAMES[9]={"Invalid","Left","Right","Up","Down","LeftUp","LeftDown","RightUp","RightDown"};
   Serial.print("Action:");Serial.println(ACTION_NAMES[actionId]);
-}
-//按照波峰时间排序
-void recognizeAction_sort1() {
-   //计算手势的开始/结束时间
-  unsigned long firstTime=0;
-  unsigned long lastTime =0;
-  for (int i = 1; i < SENSOR_COUNT; i++) {
-    unsigned long t=sensors[i].peakVTime;
-    if (t > 0) {
-      if(firstTime==0||t<firstTime){//firstTime未设置或者当前t小于firstTime
-        firstTime=t;
-      }
-      if(lastTime==0||t>lastTime){//lastTime未设置或者当前t大于lastTime
-        lastTime=t;
-      }
-    }
-  }
+  digitalWrite(2, LOW);   // turn the LED off
+  digitalWrite(3, LOW);   // turn the LED off
+  digitalWrite(4, LOW);   // turn the LED off
+  digitalWrite(5, LOW);   // turn the LED off
+  digitalWrite(actionId+1, HIGH);   // turn the LED on
+
+  delay(40);
+  irsend.sendNEC(IR_CODES[actionId], 32);
+  delay(1000);
   
-  //将整个手势的时间分为3等分，计算每个传感器所在时间段
-  double totalTime=lastTime-firstTime;
-  for(int i=0;i<SENSOR_COUNT;i++){
-    double curTimes=sensors[i].peakVTime-firstTime;//当前传感器出现peakVTime的时间延迟
-    double rate=curTimes/totalTime;//当前传感器延迟与总时间的比例
-    if(rate<0.40){//计算每个传感器序号
-      sensors[i].peakOrder=1;
-    }
-    else if(rate<0.60){
-      sensors[i].peakOrder=2;
-    }
-    else{
-      sensors[i].peakOrder=3;
-    }
-  }
 }
-//按照进入波峰时间排序
-void recognizeAction_sort2() {
-   //计算手势的开始/结束时间
-  unsigned long firstTime=0;
-  unsigned long lastTime =0;
-  for (int i = 1; i < SENSOR_COUNT; i++) {
-    unsigned long t=sensors[i].entryTime;
-    if (t > 0) {
-      if(firstTime==0||t<firstTime){//firstTime未设置或者当前t小于firstTime
-        firstTime=t;
-      }
-      if(lastTime==0||t>lastTime){//lastTime未设置或者当前t大于lastTime
-        lastTime=t;
-      }
-    }
-  }
-  
-  //将整个手势的时间分为3等分，计算每个传感器所在时间段
-  double totalTime=lastTime-firstTime;
-  for(int i=0;i<SENSOR_COUNT;i++){
-    double curTimes=sensors[i].entryTime-firstTime;//当前传感器出现peakVTime的时间延迟
-    double rate=curTimes/totalTime;//当前传感器延迟与总时间的比例
-    if(rate<0.4){//计算每个传感器序号
-      sensors[i].entryOrder=1;
-    }
-    else if(rate<0.6){
-      sensors[i].entryOrder=2;
-    }
-    else{
-      sensors[i].entryOrder=3;
-    }
-  }
+//  const String ACTION_NAMES[9]={"Invalid","Left","Right","Up","Down","LeftUp","LeftDown","RightUp","RightDown"};
+//直接根据Peak时间进行判断
+int recognizeActionByPeakTime(){
+   int action=0;
+   if(sensors[0].peakTime==0||sensors[1].peakTime==0||sensors[2].peakTime==0||sensors[3].peakTime==0){
+      action=0; 
+   }
+   else if(sensors[3].peakTime<sensors[0].peakTime && sensors[3].peakTime<sensors[2].peakTime
+        && sensors[1].peakTime<sensors[0].peakTime && sensors[1].peakTime<sensors[2].peakTime){
+      action=1;//向左
+   }
+   else if(sensors[3].peakTime>sensors[0].peakTime && sensors[3].peakTime>sensors[2].peakTime
+        && sensors[1].peakTime>sensors[0].peakTime && sensors[1].peakTime>sensors[2].peakTime){
+      action=2;//向右
+   }
+   else if(sensors[2].peakTime<sensors[0].peakTime && sensors[2].peakTime<sensors[1].peakTime
+        && sensors[3].peakTime<sensors[0].peakTime && sensors[3].peakTime<sensors[1].peakTime){
+      action=3;//向上
+   }
+   else if(sensors[2].peakTime>sensors[0].peakTime && sensors[2].peakTime>sensors[1].peakTime
+        && sensors[3].peakTime>sensors[0].peakTime && sensors[3].peakTime>sensors[1].peakTime){
+      action=4;//向下
+   }
+  Serial.println(String("peak:")+action);
+   return action;
+}
+//直接根据Exit时间进行判断
+int recognizeActionByExitTime(){
+   int action=0;
+   if(sensors[0].exitTime==0||sensors[1].exitTime==0||sensors[2].exitTime==0||sensors[3].exitTime==0){
+      action=0; 
+   }
+   else if(sensors[3].exitTime<sensors[0].exitTime && sensors[3].exitTime<sensors[2].exitTime
+        && sensors[1].exitTime<sensors[0].exitTime && sensors[1].exitTime<sensors[2].exitTime){
+      action=1;//向左
+   }
+   else if(sensors[3].exitTime>sensors[0].exitTime && sensors[3].exitTime>sensors[2].exitTime
+        && sensors[1].exitTime>sensors[0].exitTime && sensors[1].exitTime>sensors[2].exitTime){
+      action=2;//向右
+   }
+   else if(sensors[2].exitTime<sensors[0].exitTime && sensors[2].exitTime<sensors[1].exitTime
+        && sensors[3].exitTime<sensors[0].exitTime && sensors[3].exitTime<sensors[1].exitTime){
+      action=3;//向上
+   }
+   else if(sensors[2].exitTime>sensors[0].exitTime && sensors[2].exitTime>sensors[1].exitTime
+        && sensors[3].exitTime>sensors[0].exitTime && sensors[3].exitTime>sensors[1].exitTime){
+      action=4;//向下
+   }
+  Serial.println(String("exit:")+action);
+   return action;
 }
 
-//将排序结果转换为整数类型的action，
-int recognizeAction_covertToActionId(){
-  int actionCode=0;
-  //先按照进入波峰时间查找action
-  for(int i=0;i<SENSOR_COUNT;i++){
-    actionCode=actionCode*10+sensors[i].entryOrder;
-  }
-  Serial.println(String("entry:")+actionCode);
-  for(int i=0;i<ACTION_COUNT;i++){
-      for(int j=0;j<7;j++){
-        if(ACTION_CODES[i][j]==actionCode){
-          return i;
-      }
-    }
-  }
-  actionCode=0;
-  //按照波峰时间查找action
-  for(int i=0;i<SENSOR_COUNT;i++){
-    actionCode=actionCode*10+sensors[i].peakOrder;
-  }
-  Serial.println(String("peak:")+actionCode);
-  for(int i=0;i<ACTION_COUNT;i++){
-      for(int j=0;j<7;j++){
-        if(ACTION_CODES[i][j]==actionCode){
-          return i;
-      }
-    }
-  }
-  return 0;//如果未找到，return 0
+//直接根据Entry时间进行判断
+int recognizeActionByEntryTime(){
+   int action=0;
+   if(sensors[0].entryTime==0||sensors[1].entryTime==0||sensors[2].entryTime==0||sensors[3].entryTime==0){
+      action=0; 
+   }
+   else if(sensors[3].entryTime<sensors[0].entryTime && sensors[3].entryTime<sensors[2].entryTime
+        && sensors[1].entryTime<sensors[0].entryTime && sensors[1].entryTime<sensors[2].entryTime){
+      action=1;//向左
+   }
+   else if(sensors[3].entryTime>sensors[0].entryTime && sensors[3].entryTime>sensors[2].entryTime
+        && sensors[1].entryTime>sensors[0].entryTime && sensors[1].entryTime>sensors[2].entryTime){
+      action=2;//向右
+   }
+   else if(sensors[2].entryTime<sensors[0].entryTime && sensors[2].entryTime<sensors[1].entryTime
+        && sensors[3].entryTime<sensors[0].entryTime && sensors[3].entryTime<sensors[1].entryTime){
+      action=3;//向上
+   }
+   else if(sensors[2].entryTime>sensors[0].entryTime && sensors[2].entryTime>sensors[1].entryTime
+        && sensors[3].entryTime>sensors[0].entryTime && sensors[3].entryTime>sensors[1].entryTime){
+      action=4;//向下
+   }
+  Serial.println(String("entry:")+action);
+   return action;
 }
-/**
-   根据SensorData识别Action
-*/
-int recognizeAction() {
-  recognizeAction_sort1();
-  recognizeAction_sort2();
-  printSensorData(1,"Sort Result",sensors);
-  return recognizeAction_covertToActionId();
+//根据三个不同类型的时间进行判断
+int recognizeAction(){
+  int action1=recognizeActionByPeakTime();
+  int action2=recognizeActionByEntryTime();
+  int action3=recognizeActionByExitTime();
+  //如果有两个action相同，直接返回
+  if(action1!=0&&action1==action2){
+    return action1;
+  }
+  if(action2!=0&&action2==action3){
+    return action2;
+  }
+  if(action3!=0&&action3==action1){
+    return action3;
+  }
+  //返回单个action
+  if(action1!=0){
+    return action1;
+  }
+  if(action2!=0){
+    return action2;
+  }
+  if(action3!=0){
+    return action3;
+  }
+  return 0;
 }
-
 void resetSensorData() {
   for (int i = 0; i < SENSOR_COUNT; i++) {
     sensors[i].curV = 0;
     sensors[i].peakV = 0;
-    sensors[i].peakVTime = 0;
+    sensors[i].peakTime = 0;
     sensors[i].entryTime = 0;
-    sensors[i].peakOrder = 0;
-    sensors[i].entryOrder = 0;
+    sensors[i].exitTime = 0;
   }
 }
 
@@ -278,7 +305,8 @@ void loop() {
 //  printSensorData(1,"",sensors);
   if (hasCompletedAction()) {
     Serial.println("New Action");
-   // printSensorData(0,"",sensors);
+    printSensorData(0,"",sensors);
+ //   int action = recognizeAction();
     int action = recognizeAction();
     sendAction(action);
     resetSensorData();
