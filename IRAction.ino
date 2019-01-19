@@ -38,7 +38,7 @@ const int buttonPin = 10;     // the number of the pushbutton pin
 int buttonState = LOW;         // variable for reading the pushbutton status
 int functionType=0;//遥控功能，0：收音机，1：电视机
 
-//排序用时间数组
+//传感器数组
 struct Sensor {
   int sensorId;//传感器对应下标
   float curV;//当前电压
