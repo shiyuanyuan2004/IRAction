@@ -1,12 +1,9 @@
-//sensor重命名
 #include <IRremote.h>
 #include <Arduino.h>
 #include "U8glib.h"
 //#include "utility/u8g.h"
 U8GLIB_SSD1306_128X64 u8g(U8G_I2C_OPT_NONE|U8G_I2C_OPT_DEV_0);  // I2C / TWI 
-//U8GLIB_SSD1306_128X64 u8g(U8G_I2C_OPT_DEV_0|U8G_I2C_OPT_NO_ACK|U8G_I2C_OPT_FAST); // Fast I2C / TWI 
 
-//不要使用自定义format函数，函数内字符串拼接有bug，导致死机
 /*
  * 红外传感器数目，2*2
  * 传感器位置
